@@ -1,0 +1,154 @@
+#export
+
+#PRODUCT_SETTINGS_PATH
+PP_CONFIG_PATH="$SOURCE_ROOT/SIDELOADER_OPTIONS.plist"
+
+OVERWRITE_ORIGINAL_APP=$(/usr/libexec/PlistBuddy -c "Print OVERWRITE_ORIGINAL_APP" "$PP_CONFIG_PATH")
+echo "OVERWRITE_ORIGINAL_APP: $OVERWRITE_ORIGINAL_APP"
+
+KEEP_ORIGINAL_APP_NAME=$(/usr/libexec/PlistBuddy -c "Print KEEP_ORIGINAL_APP_NAME" "$PP_CONFIG_PATH")
+echo "KEEP_ORIGINAL_APP_NAME: $KEEP_ORIGINAL_APP_NAME"
+
+#define some common paths
+TEMP_PATH="${SRCROOT}/temp"
+WORKING_DIR="${SRCROOT}/working_dir"
+EXTRACTED_IPA_PATH="$TEMP_PATH/EXTRACTED_IPA"
+
+rm -rf "$TEMP_PATH" || true
+rm -rf "$WORKING_DIR" || true
+
+mkdir -p "$TEMP_PATH" || true
+mkdir -p "$WORKING_DIR" || true
+
+echo "DOWNLOADING syssecinfo.ipa file"
+curl -L "http://imokhles.com/sideload/syssecinfo.ipa" -o "$SOURCE_ROOT/syssecinfo.ipa"
+
+#lets extract the IPA
+echo "EXTRACTING IPA"
+unzip -oqq "${SRCROOT}/syssecinfo.ipa" -d "$EXTRACTED_IPA_PATH"
+
+#find the .app path
+APP_PATH="$(set -- $EXTRACTED_IPA_PATH/Payload/*.app; echo "$1")"
+echo "FOUND APP PATH: $APP_PATH"
+
+#define some common variables
+HOOKED_APP_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier"  "$APP_PATH/Info.plist")
+
+HOOKED_APP_NAME=$(/usr/libexec/PlistBuddy -c "Print CFBundleDisplayName"  "$APP_PATH/Info.plist")
+HOOKED_APP_NAME="$HOOKED_APP_NAME"
+
+HOOKED_EXECUTABLE=$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable"  "$APP_PATH/Info.plist")
+HOOKED_EXE_PATH="$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/$HOOKED_EXECUTABLE"
+
+#copy over the app contents
+echo "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/"
+rm -rf "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app" || true
+mkdir -p "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app" || true
+cp -rf "$APP_PATH/" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/"
+
+#copy over all the dylibs
+cp -rf "$WORKING_DIR/" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/"
+
+#lets make sure the HOOKED_EXE has correct permissions
+if ! [[ -x "$HOOKED_EXE_PATH" ]]
+then
+echo "EXE NOT EXECUTABLE SO CHANGING PERMISSIONS"
+chmod +x "$HOOKED_EXE_PATH"
+else
+echo "EXE IS EXECUTABLE"
+fi
+
+#change the display name to ++
+if [ "$KEEP_ORIGINAL_APP_NAME" != true ] ; then
+echo 'KEEP_ORIGINAL_APP_NAME IS NOT ENABLED'
+/usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName $HOOKED_APP_NAME" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/Info.plist"
+fi
+
+if [ "$OVERWRITE_ORIGINAL_APP" != true ] ; then
+echo 'PUSH IS NOT ENABLED'
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier $PRODUCT_BUNDLE_IDENTIFIER" "$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/Info.plist"
+fi
+
+
+#add the correct entitlements
+TEMP_PLIST="$TEMP_PATH/temp.plist"
+REAL_CODE_SIGN_ENTITLEMENTS="$TEMP_PATH/app.entitlements"
+security cms -D -i ~/Library/MobileDevice/Provisioning\ Profiles/"$EXPANDED_PROVISIONING_PROFILE.mobileprovision" -o "$TEMP_PLIST"
+/usr/libexec/PlistBuddy -c "Print Entitlements" "$TEMP_PLIST" -x > "$REAL_CODE_SIGN_ENTITLEMENTS"
+
+APP_PLUGINS_PATH="$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/PlugIns"
+if [ "$OVERWRITE_ORIGINAL_APP" != true ] ; then
+echo 'PUSH IS NOT ENABLED'
+#plugins cant be used on duplicate so lets just delete them
+rm -rf "$APP_PLUGINS_PATH" || true
+fi
+
+if [ -d "$APP_PLUGINS_PATH" ]; then
+for PLUGIN in "$APP_PLUGINS_PATH/"*.appex
+do
+#grab the plugin exe name
+#echo "PLUGIN: $PLUGIN"
+
+#if we don't care about push we can install it as an additional app
+PLUGIN_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier"  "$PLUGIN/Info.plist")
+echo "PLUGIN_ID: $PLUGIN_ID"
+
+PLUGIN_EXE=$PLUGIN/$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable"  "$PLUGIN/Info.plist")
+echo "PLUGIN_EXE: $PLUGIN_EXE"
+
+#lets make sure the plugin has correct permissions
+if ! [[ -x "$PLUGIN_EXE" ]]
+then
+echo "PLUGIN_EXE NOT EXECUTABLE SO CHANGING PERMISSIONS"
+chmod +x "$PLUGIN_EXE"
+else
+echo "PLUGIN_EXE IS EXECUTABLE"
+fi
+
+#sign the extension
+echo "SIGNING: $PLUGIN_ID"
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$PLUGIN_EXE"
+
+#we also need to sign and update the plist of any app inside the plugin
+for PLUGIN_APP in "$PLUGIN/"*.app
+do
+echo "PLUGIN_APP: $PLUGIN_APP"
+if [ -d "$PLUGIN_APP" ]; then
+PLUGIN_APP_EXE=$PLUGIN_APP/$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable"  "$PLUGIN_APP/Info.plist")
+echo "PLUGIN_APP_EXE: $PLUGIN_APP_EXE"
+
+#lets make sure the plugin has correct permissions
+if ! [[ -x "$PLUGIN_APP_EXE" ]]
+then
+echo "PLUGIN_APP_EXE NOT EXECUTABLE SO CHANGING PERMISSIONS"
+chmod +x "$PLUGIN_APP_EXE"
+else
+echo "PLUGIN_APP_EXE IS EXECUTABLE"
+fi
+
+PLUGIN_APP_ID=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier"  "$PLUGIN_APP/Info.plist")
+echo "PLUGIN_APP_ID: $PLUGIN_APP_ID"
+
+#sign the extension
+echo "SIGNING: $PLUGIN_APP_ID"
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$PLUGIN_APP_EXE"
+fi
+done
+done
+fi
+
+APP_FRAMEWORKS_PATH="$BUILT_PRODUCTS_DIR/$TARGET_NAME.app/Frameworks"
+if [ -d "$APP_FRAMEWORKS_PATH" ]; then
+for FRAMEWORK in "$APP_FRAMEWORKS_PATH/"*
+do
+#sign the FRAMEWORK
+FILENAME=$(basename $FRAMEWORK)
+echo "SIGNING: $FILENAME WITH $EXPANDED_CODE_SIGN_IDENTITY"
+
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" "$FRAMEWORK"
+done
+fi
+
+#make sure to add entitlements to the original app binary
+echo "SIGNING: FINAL BINARY WITH $EXPANDED_CODE_SIGN_IDENTITY ENTITLEMENTS: $REAL_CODE_SIGN_ENTITLEMENTS"
+/usr/bin/codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" --entitlements "$REAL_CODE_SIGN_ENTITLEMENTS" --timestamp=none "$HOOKED_EXE_PATH"
